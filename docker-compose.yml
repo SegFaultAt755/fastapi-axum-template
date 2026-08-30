@@ -5,6 +5,7 @@ services:
       POSTGRES_DB: app_db
       POSTGRES_USER: app_user
       POSTGRES_PASSWORD: app_password
+      POSTGRES_INIT_ARGS: -c max_connections=100
     ports:
       - "5432:5432"
     volumes:
@@ -24,6 +25,21 @@ services:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/').read()\" >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  nginx:
+    build:
+      context: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      api:
         condition: service_healthy
 
 volumes:
