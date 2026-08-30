@@ -85,14 +85,18 @@ fn validate_iterations(iterations: u32) -> Result<u32, AppError> {
 }
 
 fn compute_digest(data: &str, iterations: u32) -> String {
+    // The benchmark intentionally re-hashes the previous result so each request creates
+    // a predictable CPU-heavy workload without any data-dependent branching.
     let payload = data.as_bytes();
     let mut digest = payload.to_vec();
+
     for _ in 0..iterations {
         let mut hasher = Sha256::new();
         hasher.update(&digest);
         hasher.update(payload);
         digest = hasher.finalize().to_vec();
     }
+
     hex::encode(digest)
 }
 
@@ -145,6 +149,7 @@ async fn update_user_age(
             message: "age must be between 0 and 150".to_owned(),
         });
     }
+
     let client = state.pool.get().await.map_err(AppError::internal)?;
     let row = client
         .query_opt(
@@ -153,6 +158,7 @@ async fn update_user_age(
         )
         .await
         .map_err(AppError::internal)?;
+
     match row {
         Some(row) => Ok(Json(user_from_row(row)).into_response()),
         None => Err(AppError {
@@ -184,11 +190,13 @@ async fn compute_with_database(
             status: StatusCode::NOT_FOUND,
             message: "User not found".to_owned(),
         })?;
+
     let is_male = if user.is_male { "True" } else { "False" };
     let data = format!(
         "{}|{}|{}|{}|{}",
         user.id, user.name, user.age, user.email, is_male
     );
+
     Ok(Json(json!({
         "digest": compute_digest(&data, iterations),
         "iterations": iterations,
@@ -196,7 +204,19 @@ async fn compute_with_database(
     })))
 }
 
+fn build_app_router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(root))
+        .route("/user/{user_id}", get(get_user))
+        .route("/user/{user_id}/age/{age}", put(update_user_age))
+        .route("/compute", get(compute_without_database))
+        .route("/compute-db/{user_id}", get(compute_with_database))
+        .with_state(state)
+}
+
 fn build_pool() -> Result<Pool, Box<dyn std::error::Error>> {
+    // Centralize the Postgres pool configuration so runtime startup stays readable and
+    // keeps the default connection string in a single place.
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgresql://app_user:app_password@localhost:5432/app_db".to_owned());
     let config = database_url.parse()?;
@@ -207,6 +227,7 @@ fn build_pool() -> Result<Pool, Box<dyn std::error::Error>> {
             recycling_method: RecyclingMethod::Fast,
         },
     );
+
     Ok(Pool::builder(manager)
         .max_size(DATABASE_POOL_SIZE)
         .runtime(Runtime::Tokio1)
@@ -217,15 +238,9 @@ fn build_pool() -> Result<Pool, Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = build_pool()?;
     let state = AppState { pool };
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/user/{user_id}", get(get_user))
-        .route("/user/{user_id}/age/{age}", put(update_user_age))
-        .route("/compute", get(compute_without_database))
-        .route("/compute-db/{user_id}", get(compute_with_database))
-        .with_state(state);
+    let router = build_app_router(state);
     let address: SocketAddr = "0.0.0.0:8001".parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, router).await?;
     Ok(())
 }
